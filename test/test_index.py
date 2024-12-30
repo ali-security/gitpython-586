@@ -5,12 +5,17 @@
 # This module is part of GitPython and is released under
 # the BSD License: https://opensource.org/license/bsd-3-clause/
 
+import contextlib
 from io import BytesIO
+import logging
 import os
+import re
 from stat import S_ISLNK, ST_MODE
+import subprocess
 import tempfile
 from unittest import skipIf
 import shutil
+import ddt
 
 from git import (
     IndexFile,
@@ -25,12 +30,12 @@ from git import (
 )
 from git.compat import is_win
 from git.exc import HookExecutionError, InvalidGitRepositoryError
-from git.index.fun import hook_path
+from git.index.fun import hook_path, run_commit_hook
 from git.index.typ import BaseIndexEntry, IndexEntry
 from git.objects import Blob
-from test.lib import TestBase, fixture_path, fixture, with_rw_repo
+from test.lib import TestBase, VirtualEnvironment, fixture_path, fixture, with_rw_repo
 from test.lib import with_rw_directory
-from git.util import Actor, rmtree
+from git.util import Actor, cwd, rmtree
 from git.util import HIDE_WINDOWS_KNOWN_ERRORS, hex_to_bin
 from gitdb.base import IStream
 
@@ -41,7 +46,20 @@ from pathlib import Path
 
 HOOKS_SHEBANG = "#!/usr/bin/env sh\n"
 
+log = logging.getLogger(__name__)
+
 is_win_without_bash = is_win and not shutil.which("bash.exe")
+
+
+def _get_windows_ansi_encoding():
+    """Get the encoding specified by the Windows system-wide ANSI active code page."""
+    # locale.getencoding may work but is only in Python 3.11+. Use the registry instead.
+    import winreg
+
+    hklm_path = R"SYSTEM\CurrentControlSet\Control\Nls\CodePage"
+    with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, hklm_path) as key:
+        value, _ = winreg.QueryValueEx(key, "ACP")
+    return f"cp{value}"
 
 
 def _make_hook(git_dir, name, content, make_exec=True):
@@ -57,6 +75,7 @@ def _make_hook(git_dir, name, content, make_exec=True):
     return hp
 
 
+@ddt.ddt
 class TestIndex(TestBase):
     def __init__(self, *args):
         super(TestIndex, self).__init__(*args)
